@@ -14,6 +14,8 @@ jobs:
   lint-and-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +38,8 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +60,8 @@ jobs:
     name: Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     needs: lint-and-typecheck
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +94,8 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     needs: [lint-and-typecheck, test]
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
