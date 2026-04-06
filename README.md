@@ -45,6 +45,34 @@ flowchart LR
 - **TypeScript + Next.js 15 + Tailwind** — modern stack, zero config
 - **90%+ test coverage** — comprehensive test suite out of the box
 
+## 🔐 Security & Compliance
+
+CoTrackPro is built **security-first** for justice, healthcare, and education contexts where the stakes are highest. Comprehensive security documentation is available in [`/docs/security/`](./docs/security/):
+
+| Document | Description |
+|---------|-------------|
+| [HIPAA Compliance](./docs/security/HIPAA-compliance.md) | PHI classification, BAA template, risk assessment framework, breach notification procedures |
+| [FERPA Compliance](./docs/security/FERPA-compliance.md) | Student record classification, parental consent workflows, breach notification |
+| [Data Handling Policy](./docs/security/data-handling-policy.md) | Data minimization, retention schedules, deletion procedures, portability |
+| [Encryption Specification](./docs/security/encryption-spec.md) | AES-256 at-rest, TLS 1.3 in-transit, key management, Argon2id password hashing |
+| [Access Control Matrix](./docs/security/access-control-matrix.md) | 35+ role types, permissions, MFA requirements, session management |
+| [Audit Logging Design](./docs/security/audit-logging-design.md) | Event classification, 7-year immutable retention, monitoring and alerting |
+| [Incident Response Plan](./docs/security/incident-response-plan.md) | Detection, escalation, notification timelines, remediation, post-mortem |
+| [Third-Party Compliance](./docs/security/third-party-compliance.md) | Vendor assessment, DPAs, subprocessor register, integration security |
+
+### Security Highlights
+
+- 🔒 **AES-256-GCM** encryption at rest for all user data; dedicated KMS keys per data classification
+- 🌐 **TLS 1.3** enforced for all connections; HSTS with preload; A+ SSL Labs target
+- 👤 **35+ role types** with principle of least privilege and case-scoped permissions
+- 📋 **HIPAA-compliant** PHI handling with BAA templates for healthcare integrations
+- 🎓 **FERPA-compliant** student record handling with parental consent workflows
+- 🧒 **Child data** receives dedicated encryption keys and heightened access controls
+- 📜 **7-year immutable audit logs** with cryptographic hash chains and WORM storage
+- 🚨 **Incident response plan** with < 15-minute P0 escalation and 60-day HIPAA notification compliance
+- 🤝 **Vendor DPAs** required for all third-party integrations; public subprocessor register
+- 🔑 **Argon2id** password hashing (64 MiB memory cost); MFA required for professional roles
+
 ## Quick Start
 
 ```bash
