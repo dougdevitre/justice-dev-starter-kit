@@ -1,0 +1,184 @@
+name: Publish NPM Package (court-doc-engine)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  validate:
+    name: Validate before publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+        env:
+          CI: true
+
+  auto-version:
+    name: Auto-bump version (manual trigger)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        run: |
+          npm version ${{ github.event.inputs.version_bump }} --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Generate changelog entry
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          CHANGES=$(git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)..HEAD 2>/dev/null | head -20 || echo "- Initial release")
+          cat > /tmp/new-entry.md << EOF
+
+          ## [${{ env.VERSION }}] - ${DATE}
+
+          ${CHANGES}
+
+          EOF
+
+          if [ -f CHANGELOG.md ]; then
+            # Insert after the first line (# Changelog header)
+            head -1 CHANGELOG.md > /tmp/CHANGELOG.tmp
+            cat /tmp/new-entry.md >> /tmp/CHANGELOG.tmp
+            tail -n +2 CHANGELOG.md >> /tmp/CHANGELOG.tmp
+            mv /tmp/CHANGELOG.tmp CHANGELOG.md
+          else
+            echo "# Changelog" > CHANGELOG.md
+            cat /tmp/new-entry.md >> CHANGELOG.md
+          fi
+
+      - name: Commit version bump and changelog
+        run: |
+          git add package.json CHANGELOG.md
+          git commit -m "chore(release): bump version to ${{ env.VERSION }} [skip ci]"
+          git tag "v${{ env.VERSION }}"
+          git push origin HEAD
+          git push origin "v${{ env.VERSION }}"
+
+  publish:
+    name: Publish to NPM
+    runs-on: ubuntu-latest
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    environment:
+      name: npm-publish
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Extract version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Publish to NPM
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Generate GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const version = process.env.VERSION;
+            const tag = `v${version}`;
+
+            // Get changelog for this version
+            let releaseNotes = '';
+            try {
+              const changelog = require('fs').readFileSync('CHANGELOG.md', 'utf8');
+              const versionHeader = `## [${version}]`;
+              const start = changelog.indexOf(versionHeader);
+              if (start !== -1) {
+                const end = changelog.indexOf('\n## [', start + 1);
+                releaseNotes = end !== -1
+                  ? changelog.slice(start, end).trim()
+                  : changelog.slice(start).trim();
+              }
+            } catch (e) {
+              releaseNotes = `Release ${tag}`;
+            }
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              body: releaseNotes || `Release ${tag}`,
+              draft: false,
+              prerelease: false,
+            });

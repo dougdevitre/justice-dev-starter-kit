@@ -1,0 +1,129 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Daily at 02:00 UTC
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+      - name: Run npm audit (full report)
+        if: failure()
+        run: npm audit --json > /tmp/audit-report.json || true
+
+      - name: Upload audit report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: /tmp/audit-report.json
+          retention-days: 7
+
+  sast:
+    name: Static Application Security Testing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: |
+            - javascript
+            - typescript
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript'
+
+  secret-scanning:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  container-scanning:
+    name: Container Scanning
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if Dockerfile exists
+        id: dockerfile-check
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Docker image for scanning
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        run: docker build -t justice-dev-starter-kit:scan .
+
+      - name: Run Trivy container scan
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'justice-dev-starter-kit:scan'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'

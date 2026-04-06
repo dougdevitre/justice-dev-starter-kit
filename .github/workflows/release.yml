@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type (semantic)'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  semantic-release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests before release
+        run: npm test
+        env:
+          CI: true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version bump from commits
+        if: github.event_name == 'push'
+        id: semver
+        run: |
+          # Parse conventional commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --oneline)
+          else
+            COMMITS=$(git log --oneline "${LAST_TAG}..HEAD")
+          fi
+
+          BUMP="patch"
+          if echo "$COMMITS" | grep -qE "^[a-f0-9]+ (feat|feat!|BREAKING CHANGE)"; then
+            BUMP="minor"
+          fi
+          if echo "$COMMITS" | grep -qE "(BREAKING CHANGE|feat!|fix!|refactor!|chore!)"; then
+            BUMP="major"
+          fi
+
+          echo "bump=${BUMP}" >> "$GITHUB_OUTPUT"
+          echo "Determined version bump: ${BUMP}"
+
+      - name: Bump version
+        id: version
+        run: |
+          BUMP="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_type || steps.semver.outputs.bump || 'patch' }}"
+          npm version "${BUMP}" --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "New version: ${VERSION}"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          DATE=$(date +%Y-%m-%d)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            RAW_COMMITS=$(git log --oneline | head -30)
+          else
+            RAW_COMMITS=$(git log --oneline "${LAST_TAG}..HEAD")
+          fi
+
+          # Categorize commits
+          FEATURES=$(echo "$RAW_COMMITS" | grep -E "^[a-f0-9]+ feat" | sed 's/^[a-f0-9]* /- /' || true)
+          FIXES=$(echo "$RAW_COMMITS" | grep -E "^[a-f0-9]+ fix" | sed 's/^[a-f0-9]* /- /' || true)
+          CHORES=$(echo "$RAW_COMMITS" | grep -E "^[a-f0-9]+ (chore|docs|style|refactor|test|ci)" | sed 's/^[a-f0-9]* /- /' || true)
+          BREAKING=$(echo "$RAW_COMMITS" | grep -E "BREAKING CHANGE|!:" | sed 's/^[a-f0-9]* /- /' || true)
+
+          ENTRY="## [${VERSION}] - ${DATE}"$'\n'
+          if [ -n "$BREAKING" ]; then
+            ENTRY="${ENTRY}"$'\n'"### ⚠️ Breaking Changes"$'\n'"${BREAKING}"$'\n'
+          fi
+          if [ -n "$FEATURES" ]; then
+            ENTRY="${ENTRY}"$'\n'"### ✨ New Features"$'\n'"${FEATURES}"$'\n'
+          fi
+          if [ -n "$FIXES" ]; then
+            ENTRY="${ENTRY}"$'\n'"### 🐛 Bug Fixes"$'\n'"${FIXES}"$'\n'
+          fi
+          if [ -n "$CHORES" ]; then
+            ENTRY="${ENTRY}"$'\n'"### 🔧 Maintenance"$'\n'"${CHORES}"$'\n'
+          fi
+
+          # Update CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            HEADER=$(head -1 CHANGELOG.md)
+            printf '%s\n\n%s\n%s' "$HEADER" "$ENTRY" "$(tail -n +2 CHANGELOG.md)" > CHANGELOG.md
+          else
+            printf '# Changelog\n\n%s\n' "$ENTRY" > CHANGELOG.md
+          fi
+
+          # Save entry for release notes (escape for GitHub output)
+          {
+            echo "entry<<EOF"
+            echo "$ENTRY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit release
+        run: |
+          git add package.json CHANGELOG.md
+          git commit -m "chore(release): v${{ steps.version.outputs.version }} [skip ci]"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin HEAD
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const tag = `v${version}`;
+            const body = `${{ steps.changelog.outputs.entry }}`;
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              body: body || `Release ${tag}`,
+              draft: false,
+              prerelease: version.includes('-'),
+            });
+            console.log(`Created GitHub release: ${tag}`);

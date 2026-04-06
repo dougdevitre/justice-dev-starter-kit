@@ -1,0 +1,200 @@
+name: Deploy to AWS Lambda (evidence-timeline)
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  ECR_REPOSITORY: evidence-timeline
+  LAMBDA_FUNCTION_NAME: evidence-timeline
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if Dockerfile exists
+        id: dockerfile-check
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No Dockerfile found - skipping Docker build steps."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  push-to-ecr:
+    name: Push to Amazon ECR
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      image-uri: ${{ steps.set-image-uri.outputs.image-uri }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check if Dockerfile exists
+        id: dockerfile-check
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push to ECR
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save image URI
+        if: steps.dockerfile-check.outputs.exists == 'true'
+        id: set-image-uri
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          echo "image-uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+  deploy-lambda:
+    name: Deploy to AWS Lambda (SAM)
+    runs-on: ubuntu-latest
+    needs: push-to-ecr
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: staging
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Python (for SAM CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install AWS SAM CLI
+        run: pip install aws-sam-cli
+
+      - name: Check for SAM template
+        id: sam-check
+        run: |
+          if [ -f "template.yaml" ] || [ -f "template.yml" ] || [ -f "samconfig.toml" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No SAM template found - falling back to direct Lambda update."
+          fi
+
+      - name: Deploy with SAM
+        if: steps.sam-check.outputs.exists == 'true'
+        run: |
+          sam build
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --stack-name ${{ env.LAMBDA_FUNCTION_NAME }}-staging \
+            --region ${{ env.AWS_REGION }} \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+
+      - name: Update Lambda function (fallback)
+        if: steps.sam-check.outputs.exists == 'false'
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --image-uri "${{ needs.push-to-ecr.outputs.image-uri || 'latest' }}" \
+            --region ${{ env.AWS_REGION }}
+
+  integration-tests:
+    name: Post-Deploy Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-lambda
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests against staging
+        run: |
+          if [ -f "package.json" ] && node -e "require('./package.json').scripts['test:integration']" 2>/dev/null; then
+            npm run test:integration
+          else
+            echo "No integration test script found - skipping."
+          fi
+        env:
+          STAGING_API_URL: ${{ secrets.STAGING_API_URL }}
+          CI: true
