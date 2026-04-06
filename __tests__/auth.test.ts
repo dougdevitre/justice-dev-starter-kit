@@ -9,8 +9,8 @@ import type { AuthUser } from '../src/types';
 function createMockToken(payload: Record<string, any>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const body = Buffer.from(JSON.stringify({
-    ...payload,
-    exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
+    exp: Math.floor(Date.now() / 1000) + 3600, // default: 1 hour from now
+    ...payload, // allow caller to override exp (e.g., for expired token tests)
   })).toString('base64url');
   const signature = 'mock_signature';
   return `${header}.${body}.${signature}`;
